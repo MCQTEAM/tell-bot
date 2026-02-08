@@ -123,7 +123,7 @@ def parse_csv_strict(file_bytes: bytes):
     mapping = {"A":0,"B":1,"C":2,"D":3}
     items = []
 
-Usef, [09/02/2026 02:19]
+#
 for idx, r in df.iterrows():
         row_num = idx + 1  # للعرض
         # تحقق من الحقول النصية
@@ -239,7 +239,7 @@ async def postall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = int(context.args[0])
     except:
 
-Usef, [09/02/2026 02:19]
+#
 await update.message.reply_text("CHAT_ID غير صحيح.")
         return
 

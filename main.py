@@ -1,4 +1,4 @@
-import os, io, asyncio, logging, re
+import os, io, asyncio, logging, re, random
 import pandas as pd
 import chardet
 from pypdf import PdfReader
@@ -9,8 +9,8 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 # ===== إعدادات =====
-TOKEN = os.environ["TOKEN"]
-DELAY_BETWEEN = 2  # ثواني بين كل سؤال
+TOKEN = os.environ["TOKEN"]          # حطه في Variables في Railway
+DELAY_BETWEEN = 2                   # ثواني بين كل سؤال
 
 logging.basicConfig(level=logging.INFO)
 
@@ -39,6 +39,8 @@ def parse_pdf_strict(file_bytes: bytes):
             text += "\n" + (p.extract_text() or "")
     except PdfReadError:
         pass
+    except Exception:
+        pass
 
     if not text.strip():
         try:
@@ -54,13 +56,16 @@ def parse_pdf_strict(file_bytes: bytes):
 # ===== TEXT =====
 def parse_text_questions(text: str):
     items, errors = [], []
-    text = text.replace("\r", "")
+    text = (text or "").replace("\r", "")
 
     for m in QUESTION_BLOCK.finditer(text):
         qid = m.group(1)
         q, A, B, C, D = [m.group(i).strip() for i in range(2, 7)]
         corr = (m.group(7) or "").strip().upper()
 
+        if not q:
+            errors.append(f"❌ Question {qid}: نص السؤال ناقص")
+            continue
         if corr not in {"A","B","C","D"}:
             errors.append(f"❌ Question {qid}: Correct لازم يكون A/B/C/D")
             continue
@@ -73,7 +78,8 @@ def parse_text_questions(text: str):
         })
 
     if not items:
-        errors.append("❌ لم يتم العثور على أسئلة بصيغة صحيحة.")
+        errors.append("❌ لم يتم العثور على أسئلة بصيغة صحيحة.\n"
+                      "الصيغة:\nQ1) ...\nA) ...\nB) ...\nC) ...\nD) ...\nCorrect: A")
 
     _raise_if_errors(errors)
     return items
@@ -97,21 +103,30 @@ def parse_csv_strict(file_bytes: bytes):
 
     for idx, r in df.iterrows():
         row = idx + 1
-        corr = str(r["correct"]).strip().upper()
 
+        q = str(r["question"]).strip() if pd.notna(r["question"]) else ""
+        A = str(r["A"]).strip() if pd.notna(r["A"]) else ""
+        B = str(r["B"]).strip() if pd.notna(r["B"]) else ""
+        C = str(r["C"]).strip() if pd.notna(r["C"]) else ""
+        D = str(r["D"]).strip() if pd.notna(r["D"]) else ""
+        corr = str(r["correct"]).strip().upper() if pd.notna(r["correct"]) else ""
+
+        if not q: errors.append(f"❌ Row {row}: question فارغة")
+        if not A: errors.append(f"❌ Row {row}: الخيار A فارغ")
+        if not B: errors.append(f"❌ Row {row}: الخيار B فارغ")
+        if not C: errors.append(f"❌ Row {row}: الخيار C فارغ")
+        if not D: errors.append(f"❌ Row {row}: الخيار D فارغ")
         if corr not in mapping:
-            errors.append(f"❌ Row {row}: correct لازم A/B/C/D")
+            errors.append(f"❌ Row {row}: correct لازم A/B/C/D (القيمة الحالية: '{corr or 'فارغ'}')")
+
+        # لا نضيف السؤال إذا فيه مشاكل في نفس الصف
+        if errors:
             continue
 
         items.append({
             "id": int(r["id"]),
-            "q": str(r["question"]).strip(),
-            "opts": [
-                str(r["A"]).strip(),
-                str(r["B"]).strip(),
-                str(r["C"]).strip(),
-                str(r["D"]).strip()
-            ],
+            "q": q,
+            "opts": [A, B, C, D],
             "correct_idx": mapping[corr]
         })
 
@@ -124,6 +139,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "أرسل CSV أو PDF نصي في الخاص.\n"
         "/loadmine <CHAT_ID>\n"
         "/postall <CHAT_ID>\n"
+        "✅ البوت ينشر Quiz مع خلط الخيارات عشوائيًا.\n"
         "⚠️ لو في خطأ بالملف ما راح ينشر شيء."
     )
 
@@ -132,6 +148,9 @@ async def private_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     doc = update.message.document
+    if not doc:
+        return
+
     file = await context.bot.get_file(doc.file_id)
     data = await file.download_as_bytearray()
     name = (doc.file_name or "").lower()
@@ -149,17 +168,29 @@ async def private_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def loadmine_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
+        await update.message.reply_text("استخدم الأمر في الخاص.")
         return
 
-    chat_id = int(context.args[0])
-    file_entry = LAST_FILE_BY_USER.get(update.effective_user.id)
+    if not context.args:
+        await update.message.reply_text("الاستخدام: /loadmine <CHAT_ID>")
+        return
 
+    try:
+        chat_id = int(context.args[0])
+    except:
+        await update.message.reply_text("CHAT_ID غير صحيح.")
+        return
+
+    file_entry = LAST_FILE_BY_USER.get(update.effective_user.id)
     if not file_entry:
         await update.message.reply_text("أرسل ملف أولاً.")
         return
 
     try:
-        items = parse_csv_strict(file_entry["data"]) if file_entry["kind"] == "csv" else parse_pdf_strict(file_entry["data"])
+        if file_entry["kind"] == "csv":
+            items = parse_csv_strict(file_entry["data"])
+        else:
+            items = parse_pdf_strict(file_entry["data"])
     except Exception as e:
         await update.message.reply_text(str(e))
         return
@@ -168,22 +199,50 @@ async def loadmine_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"تم تحميل {len(items)} سؤال.")
 
 async def postall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = int(context.args[0])
-    pack = PACK_BY_CHAT.get(chat_id)
-
-    if not pack:
-        await update.message.reply_text("ما في أسئلة محمّلة.")
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("استخدم الأمر في الخاص.")
         return
 
-    for i, item in enumerate(pack["items"], 1):
-        await context.bot.send_poll(
-            chat_id=chat_id,
-            question=f"Q{i}) {item['q']}",
-            options=[f"A) {o}" for o in item["opts"]],
-            type="quiz",
-            correct_option_id=item["correct_idx"],
-            is_anonymous=True
-        )
+    if not context.args:
+        await update.message.reply_text("الاستخدام: /postall <CHAT_ID>")
+        return
+
+    try:
+        chat_id = int(context.args[0])
+    except:
+        await update.message.reply_text("CHAT_ID غير صحيح.")
+        return
+
+    pack = PACK_BY_CHAT.get(chat_id)
+    if not pack:
+        await update.message.reply_text("ما في أسئلة محمّلة. استخدم /loadmine أولاً.")
+        return
+
+    items = pack["items"]
+    await update.message.reply_text(f"جاري نشر {len(items)} سؤالاً كـ Quiz ...")
+
+    for i, item in enumerate(items, 1):
+        q_text = f"Q{i}) {item['q']}"
+
+        # ===== خلط الخيارات مع الحفاظ على الإجابة الصحيحة =====
+        paired = list(enumerate(item["opts"]))  # [(0,opt0),(1,opt1),(2,opt2),(3,opt3)]
+        random.shuffle(paired)
+
+        new_opts = [text for old_i, text in paired]  # نص فقط بدون A/B/C/D
+        new_correct_idx = [old_i for old_i, _ in paired].index(item["correct_idx"])
+
+        try:
+            await context.bot.send_poll(
+                chat_id=chat_id,
+                question=q_text,
+                options=new_opts,
+                type="quiz",
+                correct_option_id=new_correct_idx,
+                is_anonymous=True
+            )
+        except Exception as e:
+            await context.bot.send_message(chat_id, f"تعذر إرسال السؤال رقم {i}. السبب: {e}")
+
         await asyncio.sleep(DELAY_BETWEEN)
 
 # ===== Boot =====
